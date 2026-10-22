@@ -44,13 +44,7 @@ Les scripts des niveaux 1 et 2 créent `.env` depuis `.env.example` si ce fichie
 
 PostgreSQL et SeaweedFS sont déployés avec des StatefulSets et des volumes persistants. Un CronJob lance régulièrement le traitement des nouveaux CSV présents dans S3.
 
-Avec kind disponible dans le PATH :
 
-```cmd
-python scripts/run_level3.py --cluster projetde-demo
-```
-
-Avec le binaire Windows situé dans `artifacts/tools/` :
 
 ```cmd
 python scripts/run_level3.py --kind artifacts/tools/kind.exe --cluster projetde-demo
