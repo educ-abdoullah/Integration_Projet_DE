@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pipeline
+  namespace: projetde
+spec:
+  suspend: true
+  schedule: "*/5 * * * *"
+  timeZone: Europe/Paris
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 240
+      template:
+        metadata:
+          labels:
+            app: pipeline
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+          containers:
+            - name: pipeline
+              image: projetde-app:release
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "pipeline_data.runner", "--source", "s3"]
+              envFrom:
+                - configMapRef:
+                    name: pipeline-config
+                - secretRef:
+                    name: pipeline-secrets
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 64Mi
+                limits:
+                  cpu: "1"
+                  memory: 256Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: [ALL]

@@ -1,0 +1,13 @@
+# Documentation locale non versionnee.
+docs/
+
+# Configuration privee et fichiers generes.
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+data/
+artifacts/
+deploy/kubernetes/secrets.env
+*.kubeconfig

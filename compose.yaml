@@ -1,0 +1,89 @@
+name: projetde
+
+x-app: &app
+  image: projetde-app:local
+  build: .
+  environment: &environment
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: 5432
+    POSTGRES_DB: ${POSTGRES_DB:-transactions}
+    POSTGRES_USER: ${POSTGRES_USER:-pipeline}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Copier .env.example en .env}
+    S3_ENDPOINT_URL: http://s3:8333
+    S3_ACCESS_KEY: ${S3_ACCESS_KEY:-demo-access}
+    S3_SECRET_KEY: ${S3_SECRET_KEY:-demo-secret-change-me}
+    S3_BUCKET: ${S3_BUCKET:-transactions}
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-transactions}
+      POSTGRES_USER: ${POSTGRES_USER:-pipeline}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Copier .env.example en .env}
+      TZ: Europe/Paris
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./sql/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  pipeline:
+    <<: *app
+    entrypoint: ["python", "-m", "pipeline_data.runner"]
+
+  s3:
+    image: chrislusf/seaweedfs:4.48
+    profiles: ["s3"]
+    command: ["mini", "-dir=/data", "-ip=s3", "-ip.bind=0.0.0.0"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-demo-access}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-demo-secret-change-me}
+      S3_BUCKET: ${S3_BUCKET:-transactions}
+    ports:
+      - "127.0.0.1:${S3_PORT:-8333}:8333"
+    volumes:
+      - s3-data:/data
+    restart: unless-stopped
+
+  tests:
+    <<: *app
+    profiles: ["test"]
+    environment:
+      <<: *environment
+      RUN_INTEGRATION_TESTS: "1"
+    command: ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+
+  tests-s3:
+    <<: *app
+    profiles: ["s3"]
+    environment:
+      <<: *environment
+      RUN_INTEGRATION_TESTS: "1"
+      RUN_S3_TESTS: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      s3:
+        condition: service_started
+    command: ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+
+  demonstrations:
+    <<: *app
+    profiles: ["demo"]
+    command: ["python", "-m", "scripts.demo_failures"]
+    volumes:
+      - ./artifacts:/app/artifacts
+
+volumes:
+  postgres-data:
+  s3-data:

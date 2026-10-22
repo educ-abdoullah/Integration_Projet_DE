@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipeline-config
+  namespace: projetde
+data:
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: transactions
+  POSTGRES_USER: pipeline
+  S3_ENDPOINT_URL: http://s3:8333
+  S3_BUCKET: transactions

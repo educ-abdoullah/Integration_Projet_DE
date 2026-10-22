@@ -1,0 +1,65 @@
+name: Qualite de la pipeline data
+
+on:
+  workflow_call:
+    inputs:
+      scenario_echec:
+        type: string
+        default: aucun
+        required: false
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      scenario_echec:
+        description: "Demontrer volontairement une CI rouge"
+        type: choice
+        default: aucun
+        options: [aucun, generation, traitement]
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configuration de demonstration
+        run: |
+          cp .env.example .env
+          mkdir -p artifacts
+          chmod 777 artifacts
+      - name: Construire l'image et demarrer PostgreSQL et S3
+        run: |
+          docker compose build pipeline
+          docker compose --profile s3 up -d --wait postgres s3
+      - name: Tests unitaires et integration PostgreSQL et S3
+        run: |
+          set -o pipefail
+          docker compose --profile s3 run --rm tests-s3 2>&1 | tee artifacts/tests.log
+      - name: Generer les CSV dans S3 et inserer dans PostgreSQL
+        run: docker compose --profile s3 run --rm pipeline --generate
+      - name: Relancer sans retraiter
+        run: docker compose --profile s3 run --rm pipeline
+      - name: Simuler les pannes et verifier la reprise
+        run: docker compose --profile demo run --rm demonstrations
+      - name: Echec volontaire pour la capture de CI
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.scenario_echec == 'generation' || inputs.scenario_echec == 'traitement') }}
+        env:
+          SCENARIO: ${{ inputs.scenario_echec }}
+        run: >-
+          docker compose --profile demo run --rm demonstrations
+          python -m scripts.demo_failures --fail "$SCENARIO" --output artifacts/echec_volontaire.json
+      - name: Journaux PostgreSQL et S3
+        if: always()
+        run: docker compose --profile s3 logs --no-color postgres s3 > artifacts/services.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preuves-pipeline
+          path: artifacts/
+      - name: Arreter les services ephemeres de CI
+        if: always()
+        run: docker compose --profile s3 down

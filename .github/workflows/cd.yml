@@ -1,0 +1,129 @@
+name: Deploiement Kubernetes
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "kind = demonstration ephemere ; cluster = Kubernetes persistant configure"
+        type: choice
+        default: kind
+        options: [kind, cluster]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    uses: ./.github/workflows/ci.yml
+
+  demonstration:
+    needs: quality
+    if: github.event_name != 'workflow_dispatch' || inputs.target == 'kind'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Installer kind et kubectl depuis leurs sources officielles
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          curl -fsSLo kind.sha256sum https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64.sha256sum
+          echo "$(cut -d ' ' -f 1 kind.sha256sum)  kind" | sha256sum --check
+          curl -fsSLo kubectl https://dl.k8s.io/release/v1.35.8/bin/linux/amd64/kubectl
+          curl -fsSLo kubectl.sha256 https://dl.k8s.io/release/v1.35.8/bin/linux/amd64/kubectl.sha256
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+          chmod +x kind kubectl
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Deployer PostgreSQL, S3 et verifier le CronJob
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          python scripts/run_level3.py 2>&1 | tee artifacts/niveau3.log
+      - name: Conserver l'etat Kubernetes
+        if: always()
+        run: |
+          kubectl --kubeconfig artifacts/kubernetes/projetde-level3.kubeconfig -n projetde get pods,services,statefulsets,cronjobs,jobs,pvc > artifacts/kubernetes-status.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: preuves-deploiement-kubernetes
+          # Les kubeconfigs et secrets generes sont exclus des artefacts.
+          path: |
+            artifacts/niveau3.log
+            artifacts/kubernetes-status.txt
+      - name: Retirer uniquement le cluster de demonstration
+        if: always()
+        run: kind delete cluster --name projetde-level3 --kubeconfig artifacts/kubernetes/projetde-level3.kubeconfig
+
+  production:
+    needs: quality
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'cluster'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Construire et publier l'image Docker de cette revision
+        shell: bash
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}/pipeline:${GITHUB_SHA}"
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          DIGEST=$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}')
+          echo "PIPELINE_IMAGE=$DIGEST" >> "$GITHUB_ENV"
+      - name: Configurer l'acces au cluster et au registre prive
+        shell: bash
+        env:
+          KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+          KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT }}
+          PRODUCTION_SECRETS_ENV: ${{ secrets.PRODUCTION_SECRETS_ENV }}
+          GHCR_READ_USERNAME: ${{ secrets.GHCR_READ_USERNAME }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$KUBE_CONFIG_DATA" && test -n "$KUBE_CONTEXT"
+          test -n "$PRODUCTION_SECRETS_ENV" && test -n "$GHCR_READ_USERNAME" && test -n "$GHCR_READ_TOKEN"
+          umask 077
+          printf '%s' "$KUBE_CONFIG_DATA" | base64 --decode > "$RUNNER_TEMP/production.kubeconfig"
+          printf '%s\n' "$PRODUCTION_SECRETS_ENV" > "$RUNNER_TEMP/pipeline-secrets.env"
+          export KUBECONFIG="$RUNNER_TEMP/production.kubeconfig"
+          echo "KUBECONFIG=$KUBECONFIG" >> "$GITHUB_ENV"
+          kubectl --context "$KUBE_CONTEXT" apply -f deploy/kubernetes/namespace.yaml
+          kubectl --context "$KUBE_CONTEXT" -n projetde create secret docker-registry ghcr-pull --docker-server=ghcr.io --docker-username="$GHCR_READ_USERNAME" --docker-password="$GHCR_READ_TOKEN" --dry-run=client -o yaml | kubectl --context "$KUBE_CONTEXT" apply -f -
+      - name: Deployer et activer le traitement toutes les cinq minutes
+        env:
+          KUBE_CONTEXT: ${{ vars.KUBE_CONTEXT }}
+        run: >-
+          python scripts/deploy_kubernetes.py
+          --context "$KUBE_CONTEXT"
+          --image "$PIPELINE_IMAGE"
+          --secrets-file "$RUNNER_TEMP/pipeline-secrets.env"
+          --image-pull-secret ghcr-pull
+      - name: Effacer les fichiers d'acces temporaires du runner
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/production.kubeconfig" "$RUNNER_TEMP/pipeline-secrets.env"
+          docker logout ghcr.io
